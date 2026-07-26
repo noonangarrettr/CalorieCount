@@ -826,6 +826,11 @@
   }
   .sheet .qty { flex: 0 0 88px; }
   .sheet .serving { flex: 1; min-width: 0; }
+  .sheet select:disabled { opacity: 0.55; }
+  .sheet .serving-hint {
+    font-size: 10px; color: var(--ink-soft);
+    margin-top: 6px; letter-spacing: 0.02em;
+  }
 
   .preview {
     display: grid;
@@ -1223,6 +1228,7 @@
         <select id="f-serving"></select>
       </div>
     </div>
+    <div class="serving-hint" id="serving-hint" hidden>Loading serving sizes…</div>
 
     <div class="field-row">
       <div class="serving">
@@ -1316,6 +1322,77 @@
     }
   }
 
+  /* USDA keeps count-based portions ("1 large egg = 50 g") in `foodPortions`,
+     which ONLY the /food/{id} detail endpoint returns. Search results carry
+     `servingSize` for branded products and nothing at all for the generic
+     Foundation / SR Legacy entries — which is why a plain egg used to offer
+     100 g and nothing else. See hydrateServings() for the on-demand fetch. */
+  const UNSPECIFIED = /^quantity not specified$/i;
+  const MAX_SERVINGS = 12;
+
+  function usdaPortionLabel(p) {
+    const desc = String(p.portionDescription || '').trim();
+    if (desc && !UNSPECIFIED.test(desc)) return desc;
+    // SR Legacy splits the same idea across amount / measureUnit / modifier,
+    // and parks "undetermined" in measureUnit when the portion is a count.
+    const parts = [];
+    const amount = Number(p.amount);
+    if (isFinite(amount) && amount > 0) parts.push(String(round(amount, 2)));
+    const unit = String(p.measureUnit?.name || '').trim();
+    if (unit && unit.toLowerCase() !== 'undetermined') parts.push(unit);
+    const modifier = String(p.modifier || '').trim();
+    if (modifier && !UNSPECIFIED.test(modifier)) parts.push(modifier);
+    return parts.join(' ').trim();
+  }
+
+  /* USDA's own sequenceNumber often puts a bulk measure first — the egg
+     record leads with "1 cup (4.86 large eggs)". Nobody logs eggs by the
+     cup, so count-based portions ("1 large") sort ahead of volume ones and
+     become the default selection. */
+  const VOLUME_MEASURE =
+    /\b(cups?|tbsps?|tablespoons?|tsps?|teaspoons?|fl oz|fluid ounces?|pints?|quarts?|gallons?|lit(?:er|re)s?|ml)\b/i;
+
+  const portionRank = label => (VOLUME_MEASURE.test(label) ? 1 : 0);
+
+  /** Build the selectable serving list. 100 g is always the last resort. */
+  function usdaServings(food) {
+    const servings = [];
+    const seen = new Set();
+    const push = (label, grams) => {
+      const g = round(grams);
+      if (!isFinite(g) || g <= 0 || !label) return;
+      const key = `${label}|${g}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      servings.push({ label, grams: g });
+    };
+
+    // Branded products: the serving off the nutrition panel.
+    if (food.servingSize && food.servingSizeUnit) {
+      const grams = toGrams(food.servingSize, food.servingSizeUnit);
+      if (grams) {
+        push(food.householdServingFullText
+          ? `${food.householdServingFullText} (${grams} g)`
+          : `${food.servingSize} ${food.servingSizeUnit}`, grams);
+      }
+    }
+
+    // Generic foods: counts and household measures from the detail record.
+    const portions = (food.foodPortions || [])
+      .map(p => ({ p, label: usdaPortionLabel(p), grams: Number(p.gramWeight) }))
+      .filter(x => x.label && isFinite(x.grams) && x.grams > 0)
+      .sort((a, b) =>
+        portionRank(a.label) - portionRank(b.label) ||
+        (a.p.sequenceNumber ?? 0) - (b.p.sequenceNumber ?? 0));
+    for (const { label, grams } of portions) {
+      if (servings.length >= MAX_SERVINGS) break;
+      push(`${label} (${round(grams)} g)`, grams);
+    }
+
+    push('100 g', 100);
+    return servings;
+  }
+
   function normalizeUsdaFood(food) {
     const nutrition = { ...EMPTY };
     for (const n of (food.foodNutrients || [])) {
@@ -1324,26 +1401,36 @@
       if (!key) continue;
       nutrition[key] = round(n.value ?? n.amount ?? 0);
     }
-    const servings = [{ label: '100 g', grams: 100 }];
-    if (food.servingSize && food.servingSizeUnit) {
-      const grams = toGrams(food.servingSize, food.servingSizeUnit);
-      if (grams) {
-        servings.unshift({
-          label: food.householdServingFullText
-            ? `${food.householdServingFullText} (${grams} g)`
-            : `${food.servingSize} ${food.servingSizeUnit}`,
-          grams,
-        });
-      }
-    }
     return {
       source: 'usda',
       sourceId: String(food.fdcId),
       name: titleCase(food.description || 'Unknown food'),
       brand: food.brandOwner || food.brandName || null,
       barcode: food.gtinUpc || null,
-      servings, per100g: nutrition,
+      servings: usdaServings(food), per100g: nutrition,
     };
+  }
+
+  /* ---- On-demand serving hydration ----
+     One extra request, made only when the user actually opens a food whose
+     search result came back with just "100 g". Cached per fdcId for the
+     session; the resolved food is also written to the Firestore food cache
+     when logged, so recents keep their real servings. */
+  const portionCache = new Map();       // fdcId -> servings[]
+
+  const needsServings = food =>
+    food.source === 'usda' && (food.servings || []).length <= 1;
+
+  async function fetchUsdaServings(fdcId) {
+    if (portionCache.has(fdcId)) return portionCache.get(fdcId);
+    // NB: no `format=abridged` — the abridged payload omits foodPortions.
+    const url = new URL(`${CONFIG.usdaBase}/food/${encodeURIComponent(fdcId)}`);
+    url.searchParams.set('api_key', CONFIG.usdaKey);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`USDA detail ${res.status}`);
+    const servings = usdaServings(await res.json());
+    portionCache.set(fdcId, servings);
+    return servings;
   }
 
   function normalizeOffProduct(p) {
@@ -2066,14 +2153,22 @@
 
   /* ---- Logging sheet ---- */
   let current = null;
+  // Bumped on every open/close so a slow serving fetch can tell whether the
+  // sheet it started for is still the one on screen.
+  let sheetToken = 0;
 
-  function openSheet(food) {
+  function renderServingOptions(food) {
+    $('f-serving').innerHTML = food.servings
+      .map((s, i) => `<option value="${i}">${escapeHtml(s.label)}</option>`).join('');
+  }
+
+  async function openSheet(food) {
+    const token = ++sheetToken;
     current = food;
     $('sheet-name').textContent = food.name;
     $('sheet-brand').textContent = [food.brand, food.barcode && `#${food.barcode}`]
       .filter(Boolean).join(' · ');
-    $('f-serving').innerHTML = food.servings
-      .map((s, i) => `<option value="${i}">${escapeHtml(s.label)}</option>`).join('');
+    renderServingOptions(food);
     $('f-qty').value = 1;
     // If they arrived via a meal's "+", default to that meal; otherwise
     // guess from the clock so the common case needs no interaction.
@@ -2081,11 +2176,39 @@
     updatePreview();
     $('backdrop').classList.add('open');
     $('sheet').classList.add('open');
+
+    if (!needsServings(food)) return;
+
+    // Generic USDA foods arrive with only "100 g" — go get the real portions.
+    const select = $('f-serving');
+    select.disabled = true;
+    $('serving-hint').hidden = false;
+    try {
+      const servings = await withTimeout(
+        fetchUsdaServings(food.sourceId), SEARCH.timeoutMs, 'USDA detail');
+      if (sheetToken !== token) return;          // closed or replaced meanwhile
+      if (servings.length > 1) {
+        // Default to the first real portion ("1 large (50 g)"), not 100 g.
+        current = { ...food, servings };
+        renderServingOptions(current);
+        updatePreview();
+      }
+    } catch {
+      /* Leave the 100 g option in place — logging by weight still works. */
+    } finally {
+      if (sheetToken === token) {
+        select.disabled = false;
+        $('serving-hint').hidden = true;
+      }
+    }
   }
 
   function closeSheet() {
+    sheetToken++;
     $('backdrop').classList.remove('open');
     $('sheet').classList.remove('open');
+    $('f-serving').disabled = false;
+    $('serving-hint').hidden = true;
     current = null;
   }
 
