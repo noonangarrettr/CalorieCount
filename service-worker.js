@@ -12,7 +12,7 @@
    users will keep the old copy until their cache expires.
    ============================================================ */
 
-const CACHE_VERSION = 'caloriecount-v4';
+const CACHE_VERSION = 'caloriecount-v5';
 
 const SHELL = [
   './',
