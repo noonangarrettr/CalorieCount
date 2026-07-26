@@ -133,6 +133,7 @@ function normalizeUsdaFood(food) {
   return {
     source: 'usda',
     sourceId: String(food.fdcId),
+    dataType: food.dataType || null,
     name: titleCase(food.description || food.lowercaseDescription || 'Unknown food'),
     brand: food.brandOwner || food.brandName || null,
     barcode: food.gtinUpc || null,
@@ -146,18 +147,33 @@ function normalizeUsdaFood(food) {
 const needsServings = food =>
   food.source === 'usda' && (food.servings || []).length <= 1;
 
-async function searchUsda(query, { limit = 20 } = {}) {
+async function usdaQuery(query, dataType, limit) {
   const url = new URL(`${CONFIG.usdaBase}/foods/search`);
   url.searchParams.set('api_key', CONFIG.usdaKey);
   url.searchParams.set('query', query);
   url.searchParams.set('pageSize', limit);
-  // Foundation + SR Legacy give clean generic foods; Branded covers packaged.
-  url.searchParams.set('dataType', 'Foundation,SR Legacy,Branded');
+  url.searchParams.set('dataType', dataType);
 
   const res = await fetch(url);
   if (!res.ok) throw new Error(`USDA search failed (${res.status})`);
   const data = await res.json();
   return (data.foods || []).map(normalizeUsdaFood);
+}
+
+/* Two queries rather than one blended search. A plain term like "egg"
+   matches tens of thousands of Branded products, which crowd the generic
+   Foundation / SR Legacy entry out of a single response — and the generic
+   entry is the ONLY one carrying count portions ("1 large"). Asking for
+   each bucket separately guarantees both are represented. */
+async function searchUsda(query, { limit = 20 } = {}) {
+  const [generic, branded] = await Promise.allSettled([
+    usdaQuery(query, 'Foundation,SR Legacy', Math.ceil(limit * 0.45)),
+    usdaQuery(query, 'Branded', Math.ceil(limit * 0.55)),
+  ]);
+  const g = generic.status === 'fulfilled' ? generic.value : [];
+  const b = branded.status === 'fulfilled' ? branded.value : [];
+  if (!g.length && !b.length && generic.status === 'rejected') throw generic.reason;
+  return [...g, ...b].slice(0, limit);
 }
 
 /** Full detail record — the only response that carries foodPortions. */
@@ -353,15 +369,18 @@ function round(v, dp = 1) {
 function toGrams(value, unit) {
   const v = Number(value);
   if (!isFinite(v)) return null;
-  switch (String(unit).toLowerCase()) {
-    case 'g': case 'gram': case 'grams': return round(v);
-    case 'mg': return round(v / 1000);
-    case 'kg': return round(v * 1000);
-    case 'oz': return round(v * 28.3495);
-    case 'lb': return round(v * 453.592);
+  // USDA branded records report units as UN/CEFACT codes (GRM/MLT) about as
+  // often as plain "g"/"ml". Missing them silently drops the label serving.
+  switch (String(unit).toLowerCase().trim()) {
+    case 'g': case 'gram': case 'grams': case 'grm': return round(v);
+    case 'mg': case 'mgm': return round(v / 1000);
+    case 'kg': case 'kgm': return round(v * 1000);
+    case 'oz': case 'onz': return round(v * 28.3495);
+    case 'lb': case 'lbr': return round(v * 453.592);
     // Volume units aren't mass — approximating as water density.
     // Fine for milk or broth, wrong for oil or flour. Flag in UI.
-    case 'ml': case 'l': return round(unit === 'l' ? v * 1000 : v);
+    case 'ml': case 'mlt': case 'milliliter': case 'millilitre': return round(v);
+    case 'l': case 'ltr': case 'liter': case 'litre': return round(v * 1000);
     default: return null;
   }
 }
