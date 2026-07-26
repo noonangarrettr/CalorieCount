@@ -7,12 +7,17 @@
 <meta name="theme-color" content="#1A1A18">
 <meta name="description" content="Calorie and macro tracking with barcode scanning.">
 <link rel="manifest" href="./manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Inter:wght@400;500;600&display=swap">
 <link rel="apple-touch-icon" href="./icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="CalorieCount">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Archivo+Expanded:wght@700;800&family=Inter:wght@400;500;600&display=swap');
+  /* Fonts load via <link> in <head>. Note: there is no "Archivo Expanded"
+     family on Google Fonts — requesting it silently serves nothing and
+     every header falls back to the system font. Use Archivo throughout. */
 
   :root {
     --bg: #FAFAF7;
@@ -58,7 +63,7 @@
     background: var(--card);
   }
   .signin-wordmark {
-    font-family: 'Archivo Expanded', sans-serif;
+    font-family: 'Archivo', sans-serif;
     font-weight: 800; font-size: 18px;
     letter-spacing: 0.05em; text-transform: uppercase;
     border-bottom: 3px solid var(--rule);
@@ -85,7 +90,7 @@
     width: 100%; padding: 13px;
     background: var(--ink); color: var(--bg);
     border: none; border-radius: var(--radius);
-    font-family: 'Archivo Expanded', sans-serif;
+    font-family: 'Archivo', sans-serif;
     font-size: 12px; font-weight: 800;
     letter-spacing: 0.07em; text-transform: uppercase;
     cursor: pointer;
@@ -116,7 +121,7 @@
     justify-content: space-between;
   }
   header.topbar .wordmark {
-    font-family: 'Archivo Expanded', sans-serif;
+    font-family: 'Archivo', sans-serif;
     font-weight: 800;
     font-size: 15px;
     letter-spacing: 0.06em;
@@ -225,18 +230,21 @@
   /* ---------- Meal sections ---------- */
   .section-title {
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    gap: 12px;
     margin: 26px 0 8px;
     padding-bottom: 7px;
     border-bottom: 1px solid var(--rule);
   }
+  /* Title takes the slack so kcal / save / + stay grouped on the right —
+     space-between floated the kcal count into the middle of the row. */
   .section-title h2 {
-    font-family: 'Archivo Expanded', sans-serif;
+    font-family: 'Archivo', sans-serif;
     font-size: 13px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     font-weight: 800;
+    margin-right: auto;
   }
   .section-title .kcal {
     font-size: 12px;
@@ -247,6 +255,7 @@
     background: none; border: none;
     font-size: 18px; color: var(--ink);
     cursor: pointer; line-height: 1;
+    padding: 2px 6px;
   }
 
   .food-item {
@@ -286,7 +295,7 @@
     margin-bottom: 14px;
   }
   .adder summary {
-    font-family: 'Archivo Expanded', sans-serif;
+    font-family: 'Archivo', sans-serif;
     font-size: 11px; font-weight: 800;
     letter-spacing: 0.07em; text-transform: uppercase;
     cursor: pointer;
@@ -305,6 +314,21 @@
     padding: 4px 0 4px 10px;
   }
   .save-meal-btn:hover { color: var(--ink); }
+
+  /* Generic primary button — used by "Save goals", "Save food", "Sign out".
+     Previously only .sheet .submit was styled, so those rendered as bare
+     browser-default buttons. */
+  button.submit {
+    width: 100%;
+    margin-top: 16px;
+    padding: 14px;
+    background: var(--ink); color: var(--bg);
+    border: none; border-radius: var(--radius);
+    font-family: 'Archivo', sans-serif;
+    font-size: 12px; font-weight: 800;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    cursor: pointer;
+  }
 
   /* ---------- Forms (Goals / weight entry) ---------- */
   .form-grid {
@@ -436,31 +460,43 @@
     flex: 1;
     background: none;
     border: none;
-    padding: 12px 0 8px;
+    padding: 10px 0 8px;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 4px;
     color: var(--ink-soft);
+    cursor: pointer;
+  }
+  nav.tabbar button.active { color: var(--ink); }
+  /* Fixed-height icon box + SVG icons: every label sits on the same
+     baseline regardless of glyph. (Unicode symbols render at different
+     sizes per platform, which made the bar look ragged.) */
+  nav.tabbar button .icon {
+    height: 22px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  nav.tabbar button .icon svg { width: 21px; height: 21px; display: block; }
+  nav.tabbar button .lbl {
     font-family: 'Inter', sans-serif;
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.03em;
     text-transform: uppercase;
-    cursor: pointer;
+    line-height: 1;
   }
-  nav.tabbar button.active { color: var(--ink); }
-  nav.tabbar button .icon { font-size: 19px; }
+  /* Raised circle: 40px tall, pulled up 18px, so it still occupies the
+     same 22px of layout height as the other icons — labels stay level. */
   nav.tabbar button.fab .icon {
     background: var(--ink);
     color: var(--bg);
-    width: 34px; height: 34px;
+    width: 40px; height: 40px;
     border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 20px;
     margin-top: -18px;
     border: 3px solid var(--bg);
   }
+  nav.tabbar button.fab .icon svg { width: 20px; height: 20px; }
+  nav.tabbar button.fab.active .icon { background: var(--green); }
 
   /* ---------- Camera scanner overlay ---------- */
   .scanner {
@@ -557,7 +593,7 @@
     flex: 1;
     padding: 13px;
     border-radius: 2px;
-    font-family: 'Archivo Expanded', sans-serif;
+    font-family: 'Archivo', sans-serif;
     font-size: 11px; font-weight: 800;
     letter-spacing: 0.07em; text-transform: uppercase;
     cursor: pointer;
@@ -622,7 +658,7 @@
     color: var(--bg);
     border: none;
     border-radius: var(--radius);
-    font-family: 'Archivo Expanded', sans-serif;
+    font-family: 'Archivo', sans-serif;
     font-size: 12px;
     font-weight: 800;
     letter-spacing: 0.08em;
@@ -817,7 +853,7 @@
     padding: 14px;
     background: var(--ink); color: var(--bg);
     border: none; border-radius: var(--radius);
-    font-family: 'Archivo Expanded', sans-serif;
+    font-family: 'Archivo', sans-serif;
     font-size: 12px; font-weight: 800;
     letter-spacing: 0.08em; text-transform: uppercase;
     cursor: pointer;
@@ -856,7 +892,7 @@
     margin-bottom: 14px;
   }
   .placeholder-card h3 {
-    font-family: 'Archivo Expanded', sans-serif;
+    font-family: 'Archivo', sans-serif;
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -910,7 +946,7 @@
     <div class="wordmark">CalorieCount</div>
     <div class="date-nav">
       <button aria-label="Previous day">‹</button>
-      <span class="day-label">Today, Jul 25</span>
+      <span class="day-label">Today</span>
       <button aria-label="Next day">›</button>
     </div>
   </header>
@@ -1125,6 +1161,35 @@
       </div>
     </section>
 
+    <!-- ===================== MORE / SETTINGS SCREEN ===================== -->
+    <section class="screen" id="screen-settings">
+      <div class="placeholder-card">
+        <h3>Account</h3>
+        <p>Signed in as <strong id="acct-email">—</strong></p>
+        <button class="submit" id="btn-signout">Sign out</button>
+      </div>
+
+      <div class="placeholder-card">
+        <h3>Data &amp; Sync</h3>
+        <p>Everything you log is saved to your private Firestore database and
+        synced across devices. When you're offline, entries are stored on this
+        device and upload automatically once you're back online.</p>
+      </div>
+
+      <div class="placeholder-card">
+        <h3>Food Databases</h3>
+        <p>Search results come from USDA FoodData Central and Open Food Facts.
+        Barcode lookups use Open Food Facts. Foods you add by hand live under
+        Add&nbsp;→&nbsp;My&nbsp;Foods and always work offline.</p>
+      </div>
+
+      <div class="placeholder-card">
+        <h3>About</h3>
+        <p>CalorieCount — a personal food diary PWA.<br>
+        Add it to your home screen for the full-screen app experience.</p>
+      </div>
+    </section>
+
   </main>
 
   <div class="scanner" id="scanner">
@@ -1183,11 +1248,26 @@
   <div class="toast" id="toast"></div>
 
   <nav class="tabbar">
-    <button class="active" data-screen="diary"><span class="icon">▤</span>Diary</button>
-    <button data-screen="progress"><span class="icon">▲</span>Progress</button>
-    <button class="fab" data-screen="add"><span class="icon">+</span></button>
-    <button data-screen="goals"><span class="icon">◎</span>Goals</button>
-    <button data-screen="settings"><span class="icon">⚙</span>More</button>
+    <button class="active" data-screen="diary" aria-label="Diary">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/></svg></span>
+      <span class="lbl">Diary</span>
+    </button>
+    <button data-screen="progress" aria-label="Progress">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 9.5 11.5 13.5 15.5 20 8"/><polyline points="14.5 8 20 8 20 13.5"/></svg></span>
+      <span class="lbl">Progress</span>
+    </button>
+    <button class="fab" data-screen="add" aria-label="Add food">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></span>
+      <span class="lbl">Add</span>
+    </button>
+    <button data-screen="goals" aria-label="Goals">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.2"/></svg></span>
+      <span class="lbl">Goals</span>
+    </button>
+    <button data-screen="settings" aria-label="More">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></span>
+      <span class="lbl">More</span>
+    </button>
   </nav>
 
 </div>
@@ -2820,6 +2900,18 @@
     });
   });
 
+  /* ---- More / settings ---- */
+  $('btn-signout').addEventListener('click', async () => {
+    try {
+      await store.auth.signOut();
+    } catch (err) {
+      console.error('Sign-out failed:', err);
+    }
+    // Reload for a clean slate — cheaper and safer than unwinding all
+    // in-memory state (search index, current diary, form values) by hand.
+    location.reload();
+  });
+
   /* ==========================================================
      Bootstrap
      Order matters: auth → goals → recents → render. With the Firestore
@@ -2918,8 +3010,6 @@
     btn.textContent = 'Signing in…';
     try {
       await store.auth.signIn(email, password);
-      hideSignIn();
-      await startApp();
     } catch (err) {
       // Firebase's error codes are stable across SDK versions; map the
       // common ones to something a person can act on.
@@ -2931,9 +3021,20 @@
         'auth/network-request-failed': 'No connection — check your network.',
       };
       $('si-error').textContent = map[err.code] || `Sign-in failed: ${err.message}`;
-    } finally {
       btn.disabled = false;
       btn.textContent = 'Sign in';
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = 'Sign in';
+    // Auth succeeded — a failure past this point is a rendering problem,
+    // not a credentials problem, so don't report it as "sign-in failed".
+    hideSignIn();
+    try {
+      await startApp();
+    } catch (err) {
+      console.error('Startup after sign-in failed:', err);
+      toast('Signed in, but loading data hit a snag — pull to refresh');
     }
   }
 
@@ -2945,6 +3046,7 @@
   /** Everything that used to run unconditionally in boot() now runs only
       once we actually have a signed-in user. */
   async function startApp() {
+    $('acct-email').textContent = store.auth.email || 'your account';
     await loadLocalIndex();
     renderDateLabel();
     await renderDiary();
