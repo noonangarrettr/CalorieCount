@@ -1,0 +1,37 @@
+rules_version = '2';
+
+// Single-user app: every document lives under users/{uid}, and only that
+// signed-in user can touch it. No public reads anywhere.
+//
+// Deploy with:  firebase deploy --only firestore:rules
+// Or paste into: Firebase console → Firestore → Rules
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /users/{uid} {
+      // The user doc itself is unused, but lock it down regardless.
+      allow read, write: if isOwner(uid);
+
+      // All subcollections: days, meta, savedMeals, recipes,
+      // customFoods, foodCache, recents, weights.
+      match /{collection}/{docId} {
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid) && validSize();
+        allow delete: if isOwner(uid);
+      }
+    }
+
+    // Anything not matched above is denied by default.
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // Cheap guard against a runaway client writing an enormous document.
+    // Firestore's hard limit is 1 MiB; this trips well before that.
+    function validSize() {
+      return request.resource.size() < 500000;
+    }
+  }
+}
