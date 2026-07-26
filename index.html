@@ -41,6 +41,63 @@
     justify-content: center;
   }
 
+  /* ---------- Sign-in overlay ---------- */
+  .signin-overlay {
+    position: fixed; inset: 0;
+    background: var(--bg);
+    z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .signin-overlay.hidden { display: none; }
+  .signin-card {
+    width: 100%; max-width: 340px;
+    border: 2px solid var(--rule);
+    border-radius: var(--radius);
+    padding: 24px 22px;
+    background: var(--card);
+  }
+  .signin-wordmark {
+    font-family: 'Archivo Expanded', sans-serif;
+    font-weight: 800; font-size: 18px;
+    letter-spacing: 0.05em; text-transform: uppercase;
+    border-bottom: 3px solid var(--rule);
+    padding-bottom: 12px; margin-bottom: 12px;
+  }
+  .signin-sub {
+    font-size: 12px; color: var(--ink-soft);
+    line-height: 1.5; margin-bottom: 18px;
+  }
+  .signin-card label {
+    display: block;
+    font-size: 9px; font-weight: 700;
+    letter-spacing: 0.07em; text-transform: uppercase;
+    color: var(--ink-soft); margin-bottom: 4px;
+  }
+  .signin-card input {
+    width: 100%; padding: 10px;
+    border: 1px solid var(--rule); border-radius: var(--radius);
+    background: var(--bg); font-family: 'Inter', sans-serif;
+    font-size: 14px; color: var(--ink);
+    margin-bottom: 14px;
+  }
+  .signin-card button {
+    width: 100%; padding: 13px;
+    background: var(--ink); color: var(--bg);
+    border: none; border-radius: var(--radius);
+    font-family: 'Archivo Expanded', sans-serif;
+    font-size: 12px; font-weight: 800;
+    letter-spacing: 0.07em; text-transform: uppercase;
+    cursor: pointer;
+  }
+  .signin-card button:disabled { opacity: 0.5; cursor: default; }
+  .signin-error {
+    font-size: 11px; color: var(--red);
+    margin-top: 10px; min-height: 14px; line-height: 1.5;
+  }
+
+  /* ---------- Sign-in overlay end ---------- */
+
   .device {
     width: 100%;
     max-width: 430px;
@@ -834,6 +891,19 @@
 </style>
 </head>
 <body>
+<div class="signin-overlay" id="signin-overlay">
+  <div class="signin-card">
+    <div class="signin-wordmark">CalorieCount</div>
+    <p class="signin-sub">Sign in with the account you created in Firebase Authentication.</p>
+    <label for="si-email">Email</label>
+    <input type="email" id="si-email" autocomplete="username" inputmode="email">
+    <label for="si-password">Password</label>
+    <input type="password" id="si-password" autocomplete="current-password">
+    <button id="si-submit">Sign in</button>
+    <div class="signin-error" id="si-error"></div>
+  </div>
+</div>
+
 <div class="device">
 
   <header class="topbar">
@@ -1122,7 +1192,8 @@
 
 </div>
 
-<script>
+<script type="module">
+  import { firestoreStore } from './store-firestore.js';
   /* ==========================================================
      Food API layer (mirrors food-api.js — inlined so this file
      previews standalone over file://). In the real project,
@@ -1401,7 +1472,7 @@
     };
   }
 
-  const store = makeMemoryStore();
+  const store = firestoreStore;
   let currentDate = dayKey();
 
   /* ==========================================================
@@ -2819,21 +2890,83 @@
     await renderMacroAverages(goals);
   }
 
-  async function boot() {
-    try {
-      await store.auth.ready();
-    } catch (err) {
-      console.error('Auth failed:', err);
+  /* ==========================================================
+     Sign-in
+     Firestore's offline cache means a returning, already-authenticated
+     user should never see this screen — auth.ready() resolves from the
+     cached session before boot() even checks. It only appears on a
+     fresh browser/device with no session yet.
+     ========================================================== */
+
+  function showSignIn(message = '') {
+    $('signin-overlay').classList.remove('hidden');
+    $('si-error').textContent = message;
+  }
+  function hideSignIn() {
+    $('signin-overlay').classList.add('hidden');
+  }
+
+  async function attemptSignIn() {
+    const email = $('si-email').value.trim();
+    const password = $('si-password').value;
+    if (!email || !password) {
+      $('si-error').textContent = 'Enter both email and password.';
+      return;
     }
+    const btn = $('si-submit');
+    btn.disabled = true;
+    btn.textContent = 'Signing in…';
+    try {
+      await store.auth.signIn(email, password);
+      hideSignIn();
+      await startApp();
+    } catch (err) {
+      // Firebase's error codes are stable across SDK versions; map the
+      // common ones to something a person can act on.
+      const map = {
+        'auth/invalid-credential': 'Wrong email or password.',
+        'auth/invalid-email': 'That email address looks malformed.',
+        'auth/user-disabled': 'This account has been disabled.',
+        'auth/too-many-requests': 'Too many attempts — wait a bit and try again.',
+        'auth/network-request-failed': 'No connection — check your network.',
+      };
+      $('si-error').textContent = map[err.code] || `Sign-in failed: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Sign in';
+    }
+  }
 
-    if (store.kind === 'memory') await seedDemoData();
+  $('si-submit').addEventListener('click', attemptSignIn);
+  ['si-email', 'si-password'].forEach(id => {
+    $(id).addEventListener('keydown', e => { if (e.key === 'Enter') attemptSignIn(); });
+  });
 
+  /** Everything that used to run unconditionally in boot() now runs only
+      once we actually have a signed-in user. */
+  async function startApp() {
     await loadLocalIndex();
     renderDateLabel();
     await renderDiary();
     await renderMeals();
     await loadGoalsForm();
     await renderProgress();
+  }
+
+  async function boot() {
+    let user = null;
+    try {
+      user = await store.auth.ready();
+    } catch (err) {
+      console.error('Auth check failed:', err);
+    }
+
+    if (user) {
+      hideSignIn();
+      await startApp();
+    } else {
+      showSignIn();
+    }
   }
 
   /* ---- PWA registration ----
@@ -2847,7 +2980,9 @@
   }
 
   boot().then(() => {
-    // Home-screen shortcut: ?action=scan opens the camera straight away.
+    // Home-screen shortcut: ?action=scan opens the camera straight away —
+    // but only once signed in, or there's nothing to log the scan into.
+    if (!$('signin-overlay').classList.contains('hidden')) return;
     if (new URLSearchParams(location.search).get('action') === 'scan') {
       goToScreen('add');
       openScanner();
