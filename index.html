@@ -1310,14 +1310,16 @@
   function toGrams(value, unit) {
     const v = Number(value);
     if (!isFinite(v)) return null;
-    switch (String(unit).toLowerCase()) {
-      case 'g': case 'gram': case 'grams': return round(v);
-      case 'mg': return round(v/1000);
-      case 'kg': return round(v*1000);
-      case 'oz': return round(v*28.3495);
-      case 'lb': return round(v*453.592);
-      case 'ml': return round(v);
-      case 'l': return round(v*1000);
+    // USDA branded records report units as UN/CEFACT codes (GRM/MLT) about as
+    // often as plain "g"/"ml". Missing them silently dropped the label serving.
+    switch (String(unit).toLowerCase().trim()) {
+      case 'g': case 'gram': case 'grams': case 'grm': return round(v);
+      case 'mg': case 'mgm': return round(v/1000);
+      case 'kg': case 'kgm': return round(v*1000);
+      case 'oz': case 'onz': return round(v*28.3495);
+      case 'lb': case 'lbr': return round(v*453.592);
+      case 'ml': case 'mlt': case 'milliliter': case 'millilitre': return round(v);
+      case 'l': case 'ltr': case 'liter': case 'litre': return round(v*1000);
       default: return null;
     }
   }
@@ -1404,6 +1406,7 @@
     return {
       source: 'usda',
       sourceId: String(food.fdcId),
+      dataType: food.dataType || null,
       name: titleCase(food.description || 'Unknown food'),
       brand: food.brandOwner || food.brandName || null,
       barcode: food.gtinUpc || null,
@@ -1420,6 +1423,19 @@
 
   const needsServings = food =>
     food.source === 'usda' && (food.servings || []).length <= 1;
+
+  /* The detail record is a big payload (every nutrient, every portion) and
+     this runs on a phone — the 2.5s search budget was too tight for it. */
+  const USDA_DETAIL_TIMEOUT_MS = 9000;
+
+  /* Escape hatch so no food is ever un-loggable: a 1 g "serving" turns the
+     quantity box into a plain gram entry. Always last in the list. */
+  const GRAM_SERVING = { label: 'g — enter grams', grams: 1 };
+
+  const withGramOption = food =>
+    food.servings?.some(s => s.grams === 1)
+      ? food
+      : { ...food, servings: [...(food.servings || []), GRAM_SERVING] };
 
   async function fetchUsdaServings(fdcId) {
     if (portionCache.has(fdcId)) return portionCache.get(fdcId);
@@ -1463,16 +1479,33 @@
 
   const OFF_FIELDS = 'code,product_name,brands,nutriments,serving_size,serving_quantity';
 
-  async function searchUsda(query, limit = 15) {
+  async function usdaQuery(query, dataType, limit) {
     const url = new URL(`${CONFIG.usdaBase}/foods/search`);
     url.searchParams.set('api_key', CONFIG.usdaKey);
     url.searchParams.set('query', query);
     url.searchParams.set('pageSize', limit);
-    url.searchParams.set('dataType', 'Foundation,SR Legacy,Branded');
+    url.searchParams.set('dataType', dataType);
     const res = await fetch(url);
     if (!res.ok) throw new Error(`USDA ${res.status}`);
     const data = await res.json();
     return (data.foods || []).map(normalizeUsdaFood);
+  }
+
+  /* Two queries rather than one blended search. A plain term like "egg"
+     matches tens of thousands of Branded products, which crowd the generic
+     Foundation / SR Legacy entry out of a single 15-row response — and the
+     generic entry is the ONLY one that carries count portions ("1 large").
+     Asking for each bucket separately guarantees both are represented. */
+  async function searchUsda(query, limit = 15) {
+    const [generic, branded] = await Promise.allSettled([
+      usdaQuery(query, 'Foundation,SR Legacy', 8),
+      usdaQuery(query, 'Branded', 10),
+    ]);
+    const g = generic.status === 'fulfilled' ? generic.value : [];
+    const b = branded.status === 'fulfilled' ? branded.value : [];
+    // Only a total wipeout counts as a failure worth reporting.
+    if (!g.length && !b.length && generic.status === 'rejected') throw generic.reason;
+    return [...g, ...b].slice(0, limit);
   }
 
   async function searchOff(query, limit = 15) {
@@ -1734,6 +1767,15 @@
      earlier one, so ordering of arrival can't decide which wins. */
   const SOURCE_RANK = { custom: 3, local: 3, usda: 2, off: 1 };
 
+  /* Generic USDA entries are the ones with real count portions ("1 large"),
+     so they outrank branded packages of the same food. */
+  const GENERIC_USDA = new Set(['foundation', 'sr legacy', 'survey (fndds)']);
+  const isGenericUsda = f =>
+    f.source === 'usda' && GENERIC_USDA.has(String(f.dataType || '').toLowerCase());
+
+  const sourceRank = f => SOURCE_RANK[f.local ? 'local' : f.source] ?? 0;
+  const foodRank = f => sourceRank(f) * 10 + (isGenericUsda(f) ? 1 : 0);
+
   function mergeResults(existing, incoming) {
     const byKey = new Map();
     const keyOf = f => f.barcode ? `bc:${f.barcode}` : `${f.source}:${f.sourceId}`;
@@ -1742,17 +1784,11 @@
       const k = keyOf(f);
       const prev = byKey.get(k);
       if (!prev) { byKey.set(k, f); continue; }
-      const a = SOURCE_RANK[f.local ? 'local' : f.source] ?? 0;
-      const b = SOURCE_RANK[prev.local ? 'local' : prev.source] ?? 0;
-      if (a > b) byKey.set(k, f);
+      if (sourceRank(f) > sourceRank(prev)) byKey.set(k, f);
     }
 
-    // Stable ordering: local first, then USDA, then OFF.
-    return [...byKey.values()].sort((x, y) => {
-      const rx = SOURCE_RANK[x.local ? 'local' : x.source] ?? 0;
-      const ry = SOURCE_RANK[y.local ? 'local' : y.source] ?? 0;
-      return ry - rx;
-    });
+    // Stable ordering: yours first, then generic USDA, branded USDA, then OFF.
+    return [...byKey.values()].sort((x, y) => foodRank(y) - foodRank(x));
   }
 
   /**
@@ -2164,11 +2200,13 @@
 
   async function openSheet(food) {
     const token = ++sheetToken;
-    current = food;
+    // Decide this BEFORE padding the list, or the gram option masks it.
+    const bare = needsServings(food);
+    current = withGramOption(food);
     $('sheet-name').textContent = food.name;
     $('sheet-brand').textContent = [food.brand, food.barcode && `#${food.barcode}`]
       .filter(Boolean).join(' · ');
-    renderServingOptions(food);
+    renderServingOptions(current);
     $('f-qty').value = 1;
     // If they arrived via a meal's "+", default to that meal; otherwise
     // guess from the clock so the common case needs no interaction.
@@ -2177,28 +2215,39 @@
     $('backdrop').classList.add('open');
     $('sheet').classList.add('open');
 
-    if (!needsServings(food)) return;
+    const select = $('f-serving');
+    const hint = $('serving-hint');
+    if (!bare) { hint.hidden = true; return; }
 
     // Generic USDA foods arrive with only "100 g" — go get the real portions.
-    const select = $('f-serving');
     select.disabled = true;
-    $('serving-hint').hidden = false;
+    hint.textContent = 'Loading serving sizes…';
+    hint.hidden = false;
+
+    let message = null;                    // null => hide the hint when done
     try {
       const servings = await withTimeout(
-        fetchUsdaServings(food.sourceId), SEARCH.timeoutMs, 'USDA detail');
-      if (sheetToken !== token) return;          // closed or replaced meanwhile
+        fetchUsdaServings(food.sourceId), USDA_DETAIL_TIMEOUT_MS, 'USDA detail');
+      if (sheetToken !== token) return;    // closed or replaced meanwhile
       if (servings.length > 1) {
         // Default to the first real portion ("1 large (50 g)"), not 100 g.
-        current = { ...food, servings };
+        current = withGramOption({ ...food, servings });
         renderServingOptions(current);
         updatePreview();
+      } else {
+        // Branded records carry no foodPortions at all — say so rather than
+        // leaving a lone "100 g" looking like a bug.
+        message = 'No preset servings published for this food — pick “g” to enter grams.';
       }
-    } catch {
-      /* Leave the 100 g option in place — logging by weight still works. */
+    } catch (err) {
+      // Don't swallow this: a silent 100 g is indistinguishable from a bug.
+      console.warn('Serving sizes unavailable:', err);
+      message = 'Couldn’t load serving sizes — pick “g” to enter grams.';
     } finally {
       if (sheetToken === token) {
         select.disabled = false;
-        $('serving-hint').hidden = true;
+        hint.hidden = !message;
+        if (message) hint.textContent = message;
       }
     }
   }
@@ -2224,7 +2273,17 @@
   }
 
   $('f-qty').addEventListener('input', updatePreview);
-  $('f-serving').addEventListener('change', updatePreview);
+  $('f-serving').addEventListener('change', () => {
+    // In grams mode the quantity box IS the gram count, so 0.25 steps are
+    // useless — step in 5s instead.
+    const s = current?.servings[Number($('f-serving').value)];
+    const qty = $('f-qty');
+    const grams = s && s.grams === 1;
+    qty.step = grams ? '5' : '0.25';
+    qty.min = grams ? '1' : '0.25';
+    if (grams && Number(qty.value) === 1) qty.value = 100;
+    updatePreview();
+  });
   $('backdrop').addEventListener('click', closeSheet);
   $('do-cancel').addEventListener('click', closeSheet);
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
