@@ -19,7 +19,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js';
 import {
   initializeFirestore, persistentLocalCache, persistentSingleTabManager,
-  doc, collection, getDoc, getDocs, setDoc, deleteDoc, runTransaction,
+  doc, collection, getDoc, getDocs, setDoc, deleteDoc,
   query, where, orderBy, limit as qLimit, serverTimestamp,
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js';
 
@@ -46,6 +46,11 @@ const db = initializeFirestore(app, {
 /* ---------- paths ---------- */
 
 let uid = null;
+
+// Keep uid synced with the real auth state at all times. Without this,
+// signing in on a fresh device left uid null (auth.ready() had already
+// resolved and unsubscribed), so every write failed until a reload.
+onAuthStateChanged(auth, user => { uid = user ? user.uid : null; });
 
 const userDoc = () => {
   if (!uid) throw new Error('Not signed in');
@@ -86,13 +91,33 @@ function dayKey(date = new Date()) {
 
 const emptyDay = date => ({ date, entries: [], totals: computeTotals([]) });
 
+/**
+ * Fire-and-forget a write. With the persistent local cache enabled, writes
+ * apply to the local view immediately and sync to the server whenever the
+ * connection allows. Awaiting the server ack instead would hang every
+ * "save" for as long as the network is away — the UI would look like it
+ * simply isn't recording anything.
+ */
+const queueWrite = p => {
+  p.catch(err => console.error('Firestore write failed:', err));
+};
+
 /* ============================================================
    Auth
    ============================================================ */
 
 const authApi = {
-  signIn: (email, password) => signInWithEmailAndPassword(auth, email, password),
-  signOut: () => signOut(auth),
+  async signIn(email, password) {
+    const cred = await signInWithEmailAndPassword(auth, email, password);
+    // The onAuthStateChanged listener above will also fire, but set uid
+    // synchronously here so store calls made right after signIn() work.
+    uid = cred.user.uid;
+    return cred;
+  },
+  async signOut() {
+    await signOut(auth);
+    uid = null;
+  },
   /** Resolves once the initial auth state is known. */
   ready: () => new Promise(resolve => {
     const stop = onAuthStateChanged(auth, user => {
@@ -106,6 +131,7 @@ const authApi = {
     cb(user);
   }),
   get uid() { return uid; },
+  get email() { return auth.currentUser?.email ?? null; },
 };
 
 /* ============================================================
@@ -124,14 +150,14 @@ const firestoreStore = {
     return snap.exists() ? snap.data() : null;
   },
   async setProfile(profile) {
-    await setDoc(sub('meta', 'profile'), { ...profile, updatedAt: serverTimestamp() }, { merge: true });
+    queueWrite(setDoc(sub('meta', 'profile'), { ...profile, updatedAt: serverTimestamp() }, { merge: true }));
   },
   async getGoals() {
     const snap = await getDoc(sub('meta', 'goals'));
     return snap.exists() ? snap.data() : null;
   },
   async setGoals(goals) {
-    await setDoc(sub('meta', 'goals'), { ...goals, updatedAt: serverTimestamp() }, { merge: true });
+    queueWrite(setDoc(sub('meta', 'goals'), { ...goals, updatedAt: serverTimestamp() }, { merge: true }));
   },
 
   /* ---- diary ---- */
@@ -151,8 +177,11 @@ const firestoreStore = {
 
   /**
    * Entries live in an array on the day doc, so add/remove is read-modify-write.
-   * A transaction keeps it correct if two devices write at once — unlikely
-   * with one user, but the cost is a single extra read.
+   * Deliberately NOT a transaction: Firestore transactions require a live
+   * connection and fail outright offline, which is exactly when a food
+   * diary gets used most. getDoc falls back to the local cache, and the
+   * queued setDoc syncs when the network returns. With a single user the
+   * concurrent-writer risk a transaction would guard against is negligible.
    *
    * `food` is the normalized source food. It is NOT optional in practice:
    * log entries carry scaled macros, not the per-100g values that the food
@@ -161,36 +190,30 @@ const firestoreStore = {
    */
   async addEntry(date, entry, food = null) {
     const ref = sub('days', date);
-    await runTransaction(db, async tx => {
-      const snap = await tx.get(ref);
-      const entries = snap.exists() ? (snap.data().entries || []) : [];
-      entries.push(entry);
-      tx.set(ref, { date, entries, totals: computeTotals(entries) });
-    });
-    if (food) await this.cacheFood(food);
-    await this.touchRecent(food || entry);
+    const snap = await getDoc(ref);
+    const entries = snap.exists() ? [...(snap.data().entries || [])] : [];
+    entries.push(entry);
+    queueWrite(setDoc(ref, { date, entries, totals: computeTotals(entries) }));
+    if (food) this.cacheFood(food);
+    this.touchRecent(food || entry);
     return entry;
   },
 
   async removeEntry(date, entryId) {
     const ref = sub('days', date);
-    await runTransaction(db, async tx => {
-      const snap = await tx.get(ref);
-      if (!snap.exists()) return;
-      const entries = (snap.data().entries || []).filter(e => e.id !== entryId);
-      tx.set(ref, { date, entries, totals: computeTotals(entries) });
-    });
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return;
+    const entries = (snap.data().entries || []).filter(e => e.id !== entryId);
+    queueWrite(setDoc(ref, { date, entries, totals: computeTotals(entries) }));
   },
 
   async updateEntry(date, entryId, patch) {
     const ref = sub('days', date);
-    await runTransaction(db, async tx => {
-      const snap = await tx.get(ref);
-      if (!snap.exists()) return;
-      const entries = (snap.data().entries || [])
-        .map(e => (e.id === entryId ? { ...e, ...patch } : e));
-      tx.set(ref, { date, entries, totals: computeTotals(entries) });
-    });
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return;
+    const entries = (snap.data().entries || [])
+      .map(e => (e.id === entryId ? { ...e, ...patch } : e));
+    queueWrite(setDoc(ref, { date, entries, totals: computeTotals(entries) }));
   },
 
   /** Range of days for the Progress charts. Reads the denormalized totals only. */
@@ -217,19 +240,17 @@ const firestoreStore = {
   async touchRecent(foodOrEntry) {
     const key = `${foodOrEntry.source}_${foodOrEntry.sourceId}`;
     const ref = sub('recents', key);
-    await runTransaction(db, async tx => {
-      const snap = await tx.get(ref);
-      const useCount = snap.exists() ? (snap.data().useCount || 0) + 1 : 1;
-      tx.set(ref, {
-        source: foodOrEntry.source,
-        sourceId: foodOrEntry.sourceId,
-        name: foodOrEntry.name,
-        brand: foodOrEntry.brand ?? null,
-        barcode: foodOrEntry.barcode ?? null,
-        useCount,
-        lastUsedAt: new Date().toISOString(),
-      }, { merge: true });
-    });
+    const snap = await getDoc(ref);
+    const useCount = snap.exists() ? (snap.data().useCount || 0) + 1 : 1;
+    queueWrite(setDoc(ref, {
+      source: foodOrEntry.source,
+      sourceId: foodOrEntry.sourceId,
+      name: foodOrEntry.name,
+      brand: foodOrEntry.brand ?? null,
+      barcode: foodOrEntry.barcode ?? null,
+      useCount,
+      lastUsedAt: new Date().toISOString(),
+    }, { merge: true }));
   },
 
   /** Loaded once at startup to seed the local search index. */
@@ -251,11 +272,11 @@ const firestoreStore = {
 
   async cacheFood(food) {
     const key = `${food.source}_${food.sourceId}`;
-    await setDoc(sub('foodCache', key), {
+    queueWrite(setDoc(sub('foodCache', key), {
       ...food,
       raw: null,                       // don't store the full API payload
       cachedAt: new Date().toISOString(),
-    }, { merge: true });
+    }, { merge: true }));
   },
 
   async getCachedFood(key) {
@@ -271,12 +292,12 @@ const firestoreStore = {
   },
   async saveMeal(meal) {
     const id = meal.id || crypto.randomUUID();
-    await setDoc(sub('savedMeals', id), {
+    queueWrite(setDoc(sub('savedMeals', id), {
       ...meal, id, updatedAt: new Date().toISOString(),
-    }, { merge: true });
+    }, { merge: true }));
     return id;
   },
-  async deleteMeal(id) { await deleteDoc(sub('savedMeals', id)); },
+  async deleteMeal(id) { queueWrite(deleteDoc(sub('savedMeals', id))); },
 
   async listRecipes() {
     const snap = await getDocs(query(sub('recipes'), orderBy('name')));
@@ -284,12 +305,12 @@ const firestoreStore = {
   },
   async saveRecipe(recipe) {
     const id = recipe.id || crypto.randomUUID();
-    await setDoc(sub('recipes', id), {
+    queueWrite(setDoc(sub('recipes', id), {
       ...recipe, id, updatedAt: new Date().toISOString(),
-    }, { merge: true });
+    }, { merge: true }));
     return id;
   },
-  async deleteRecipe(id) { await deleteDoc(sub('recipes', id)); },
+  async deleteRecipe(id) { queueWrite(deleteDoc(sub('recipes', id))); },
 
   /* ---- custom foods ---- */
 
@@ -299,15 +320,15 @@ const firestoreStore = {
   },
   async addCustomFood(food) {
     const id = food.id || crypto.randomUUID();
-    await setDoc(sub('customFoods', id), { ...food, id }, { merge: true });
+    queueWrite(setDoc(sub('customFoods', id), { ...food, id }, { merge: true }));
     return id;
   },
-  async deleteCustomFood(id) { await deleteDoc(sub('customFoods', id)); },
+  async deleteCustomFood(id) { queueWrite(deleteDoc(sub('customFoods', id))); },
 
   /* ---- weight ---- */
 
   async addWeight(date, lb) {
-    await setDoc(sub('weights', date), { date, lb: round(lb), loggedAt: new Date().toISOString() });
+    queueWrite(setDoc(sub('weights', date), { date, lb: round(lb), loggedAt: new Date().toISOString() }));
   },
   async getWeights(startDate, endDate) {
     const q = query(
@@ -319,7 +340,7 @@ const firestoreStore = {
     const snap = await getDocs(q);
     return snap.docs.map(d => d.data());
   },
-  async deleteWeight(date) { await deleteDoc(sub('weights', date)); },
+  async deleteWeight(date) { queueWrite(deleteDoc(sub('weights', date))); },
 };
 
 export { firestoreStore, computeTotals, dayKey, db, auth };

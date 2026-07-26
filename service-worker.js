@@ -12,12 +12,15 @@
    users will keep the old copy until their cache expires.
    ============================================================ */
 
-const CACHE_VERSION = 'caloriecount-v1';
+const CACHE_VERSION = 'caloriecount-v2';
 
 const SHELL = [
   './',
   './index.html',
+  './store-firestore.js',
+  './firebase-config.js',
   './manifest.json',
+  './icon-180.png',
   './icon-192.png',
   './icon-512.png',
   './icon-512-maskable.png',
